@@ -1,0 +1,48 @@
+# ==========================================
+# C++ 編譯產出與執行檔
+# ==========================================
+
+# Windows 執行檔與動態函式庫
+*.exe
+*.dll
+*.sys
+
+# Linux / macOS 執行檔（無副檔名者，建議將執行檔統一放至 bin/ 資料夾或指定檔名）
+# 若有特定執行的檔名可以直接寫，例如：
+# my_program
+
+# 物件檔 (Object files) 與靜態函式庫
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+
+# ==========================================
+# IDE 與建置工具暫存檔
+# ==========================================
+
+# Visual Studio / MSVC
+.vs/
+*.vcxproj.user
+*.sln.docstates
+*.suo
+*.user
+*.pdb
+*.idb
+
+# CMake 建置資料夾
+build/
+cmake-build-debug/
+cmake-build-release/
+
+# CLion / JetBrains
+.idea/
+
+# VS Code 暫存檔（若不想上傳個人設定）
+.vscode/ipch/
+.vscode/browse.vc.db*
+
+# macOS 系統檔案
+.DS_Store
