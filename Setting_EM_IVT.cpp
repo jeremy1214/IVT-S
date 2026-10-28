@@ -18,6 +18,91 @@ static std::string channelToString(IVTChannel channel) {
     }
 }
 
+static std::string getErrorDescription(uint8_t index) {
+    switch (index) {
+        case 0x00: return "All occurred errors (Bitmask)";
+        case 0x01: return "Error ADC interrupt / System Error Hardware";
+        case 0x02: return "Error Overflow ADC channel 1 / System Error Software";
+        case 0x03: return "Error Underflow ADC channel 1";
+        case 0x04: return "Error Overflow ADC channel 2";
+        case 0x05: return "Error Underflow ADC channel 2 / Error Overtemperature";
+        case 0x06: return "Error Vref / Error Undertemperature";
+        case 0x07: return "Error current measurement implausible I1 - I2";
+        case 0x08: return "Error thermal EMF correction";
+        case 0x09: return "Error current measurement I1 open circuit / Runtime Overcurrent Pos";
+        case 0x0A: return "Error voltage measurement U1 open circuit / Runtime Overcurrent Neg";
+        case 0x0B: return "Error voltage measurement U2 open circuit";
+        case 0x0C: return "Error voltage measurement U3 open circuit";
+        case 0x0D: return "Error ntc-h open circuit";
+        case 0x0E: return "Error ntc-l open circuit";
+        case 0x0F: return "Error calibration data (offset/gain too high)";
+        default:   return "Custom Log Index (0x" + std::to_string(index) + ")";
+    }
+}
+
+// 1. 生成 Get Error / Log 請求封包
+CANCommandFrame IVTCommandBuilder::buildGetErrorRequest(
+    IVTLogType log_type,
+    uint8_t log_index,
+    uint32_t cmd_id) {
+
+    CANCommandFrame frame{};
+    frame.id = cmd_id;
+    frame.dlc = 8;
+    frame.data[0] = static_cast<uint8_t>(log_type); // 0x40 或 0x42
+    frame.data[1] = log_index;                      // 指定 Log Index (0x00 ~ 0x1F)
+
+    // DB2 ~ DB7 保留填 0x00
+    for (int i = 2; i < 8; ++i) {
+        frame.data[i] = 0x00;
+    }
+
+    std::string type_str = (log_type == IVTLogType::SinceReset) ? "Since Reset" : "Overall";
+    frame.description = "Get Error/Log (" + type_str + ") for Index 0x" + 
+                        std::to_string(log_index) + " [" + getErrorDescription(log_index) + "]";
+    return frame;
+}
+
+// 2. 解譯 Response 回傳封包 (接收 CAN ID: 0x511)
+bool IVTCommandBuilder::decodeErrorResponse(
+    const CANCommandFrame& rx_frame,
+    IVTErrorLogResult& result) {
+
+    // 檢查 DLC 長度（標準應為 8）
+    if (rx_frame.dlc < 6) {
+        result.is_success = false;
+        return false;
+    }
+
+    // 檢查 DB0 回應代碼：必須為 0xC0 (SinceReset Response) 或 0xC2 (Overall Response)
+    uint8_t resp_code = rx_frame.data[0];
+    if (resp_code != 0xC0 && resp_code != 0xC2) {
+        result.is_success = false;
+        return false;
+    }
+
+    result.response_code = resp_code;
+    result.log_index     = rx_frame.data[1]; // DB1 為感測器回應的 Log Index
+    result.error_name    = getErrorDescription(result.log_index);
+
+    // DB2..DB5 為 32-bit Big-Endian 的 數據值/計數器
+    result.raw_value = (static_cast<uint32_t>(rx_frame.data[2]) << 24) |
+                       (static_cast<uint32_t>(rx_frame.data[3]) << 16) |
+                       (static_cast<uint32_t>(rx_frame.data[4]) << 8)  |
+                       (static_cast<uint32_t>(rx_frame.data[5]));
+
+    result.is_success = true;
+
+    std::cout << "[Decode Error Response] Code: 0x" << std::hex << std::uppercase
+              << static_cast<int>(result.response_code) << std::dec
+              << ", Log Index: 0x" << std::hex << std::uppercase
+              << static_cast<int>(result.log_index) << std::dec
+              << " (" << result.error_name << ")"
+              << ", Raw Value: " << result.raw_value
+              << std::endl;
+    return true;
+}
+
 // 高階通道配置 API
 CANCommandFrame IVTCommandBuilder::configChannel(
     IVTChannel channel,

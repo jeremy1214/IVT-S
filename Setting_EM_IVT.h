@@ -4,6 +4,20 @@
 #include <string>
 #include <vector>
 
+enum class IVTLogType : uint8_t {
+    SinceReset = 0x40, // 讀取自上次 Reset 至今的 Error/Log
+    Overall    = 0x42  // 讀取生命週期累積 Overall Log
+};
+
+// 2. 解譯 Get Error Response 的結果結構
+struct IVTErrorLogResult {
+    uint8_t     response_code; // 0xC0 (SinceReset) 或 0xC2 (Overall)
+    uint8_t     log_index;     // 查詢的 Log Index (0x00 ~ 0x1F)
+    std::string error_name;    // 錯誤/日誌名稱描述
+    uint32_t    raw_value;     // DB2..DB5 解析出來的 32-bit 數據
+    bool        is_success;    // 是否解析成功
+};
+
 // 1. 定義語意化的通道名稱，不需要人工記憶 MuxID
 enum class IVTChannel : uint8_t {
     Current  = 0x00, // 電流 I
@@ -25,7 +39,21 @@ struct CANCommandFrame {
 
 class IVTCommandBuilder {
 public:
-    static constexpr uint32_t DEFAULT_CMD_ID = 0x411;
+
+    static constexpr uint32_t DEFAULT_CMD_ID = 0x411;  
+
+    // --- 發送 Get Error / Log 請求 ---
+    // log_type: SinceReset (0x40) 或 Overall (0x42)
+    // log_index: 指定要查詢的 Error Code Index (例如 0x01: Hardware, 0x09: Pos Overcurrent)
+    static CANCommandFrame buildGetErrorRequest(
+        IVTLogType log_type,
+        uint8_t log_index,
+        uint32_t cmd_id = DEFAULT_CMD_ID);
+
+    // --- 解譯感測器回傳的 Response (CAN ID: 0x511) ---
+    static bool decodeErrorResponse(
+        const CANCommandFrame& response_frame,
+        IVTErrorLogResult& result);
 
     // --- 高階設定 API (免記指令碼與 MuxID) ---
 

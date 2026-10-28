@@ -1,53 +1,119 @@
 # EM-IVT
 
-這個專案提供 IVT-S 感測器的 CAN 封包解碼與設定指令建構功能：
+This project contains C++ utilities for decoding IVT-S periodic measurement frames and constructing CAN command frames for sensor configuration.
 
-- `EM_IVT_Decode.h/.cpp`：解碼 IVT-S 常態刷新回傳資料，並可將結果輸出至終端機。
-- `Setting_EM_IVT.h/.cpp`：建立通道刷新、過流保護及完整設定流程所需的 CAN 指令。
+Included files:
 
-這些模組只負責解析及建立 CAN frame，不包含 CAN 介面初始化、封包傳送或接收功能。請由應用程式搭配 CAN 裝置／函式庫收發封包。
+- `EM_IVT_Decode.h` / `EM_IVT_Decode.cpp`: decode live measurement frames from the IVT-S sensor
+- `Setting_EM_IVT.h` / `Setting_EM_IVT.cpp`: build request/command frames for configuration, status queries, and setup flows
+- `README.md`: usage notes and examples
 
-## 需求
+These modules do not contain any CAN bus driver or hardware access layer. They only parse frames and build payloads. You still need to send/receive data through a CAN interface library or hardware adapter in your application.
 
-- 支援 C++11 或更新版本的編譯器。
-- 使用時將對應的 `.cpp` 檔加入應用程式的建置設定。
+## Requirements
 
-## 解碼回傳資料
+- C++11 or later compiler
+- Add the relevant `.cpp` file to your project build when using the library
 
-使用 `decodeIVTFrame` 解碼 CAN frame。函式成功時回傳 `true` 並填入 `IVTDecodedData`；CAN ID 不在 `0x521`～`0x528` 範圍內、DLC 小於 6，或 MuxID 不支援時回傳 `false`。
+## API Summary
 
-常態刷新封包使用 DB0～DB5：
+### Decoding live measurement data
 
-| 位元組 | 內容 |
+`decodeIVTFrame(const CANFrame&, IVTDecodedData&)`
+
+- Valid CAN IDs: `0x521` through `0x528`
+- Minimum DLC: `6`
+- Supported Mux IDs: `0x00` to `0x07`
+- Returns `false` for unsupported IDs, short frames, or unsupported Mux IDs
+
+`printIVTData(const IVTDecodedData&)`
+
+- Prints channel name, message count, raw value, converted value, and status summary
+
+### Building command frames
+
+`IVTCommandBuilder::buildGetErrorRequest(...)`
+
+- Generates the request to query error/log data
+- Supported log types:
+  - `IVTLogType::SinceReset` (`0x40`)
+  - `IVTLogType::Overall` (`0x42`)
+- Default CAN command ID: `0x411`
+
+`IVTCommandBuilder::decodeErrorResponse(...)`
+
+- Parses the response packet from the sensor
+- Accepts response codes:
+  - `0xC0` for SinceReset
+  - `0xC2` for Overall
+
+`IVTCommandBuilder::configChannel(...)`
+
+- Builds the channel refresh configuration frame
+- Parameters:
+  - channel
+  - enable_cyclic
+  - period_ms
+  - is_little_endian
+  - cmd_id
+
+`IVTCommandBuilder::setPositiveThreshold(...)`
+
+- Builds the positive overcurrent threshold frame
+- Value is given in amps as `int16_t`
+
+`IVTCommandBuilder::buildFullConfigSequence(...)`
+
+- Automatically creates the full sequence:
+  1. STOP
+  2. custom config(s)
+  3. STORE
+  4. RUN
+  5. STORE
+  6. RESTART
+
+`printCANFrame(const CANCommandFrame&)`
+
+- Prints the CAN ID, DLC, and payload bytes
+
+## Decode Format
+
+The periodic refresh packet uses DB0 to DB5.
+
+| Byte | Description |
 | --- | --- |
 | DB0 | MuxID |
-| DB1 低 4 位元 | 訊息計數器（0～15） |
-| DB1 高 4 位元 | 狀態旗標 |
-| DB2～DB5 | Big-endian、有正負號的 32 位元原始值 |
+| DB1 low 4 bits | Message counter (0–15) |
+| DB1 high 4 bits | Status flags |
+| DB2–DB5 | 32-bit signed raw value in big-endian format |
 
-支援的 MuxID 與物理量換算如下：
+### Supported Mux IDs and conversion rules
 
-| MuxID | 通道 | 換算方式 | 單位 |
+| MuxID | Channel | Conversion | Unit |
 | --- | --- | --- | --- |
-| `0x00` | 電流 Current (I) | 原始值 ÷ 1000 | A |
-| `0x01` | 電壓 Voltage 1 (U1) | 原始值 ÷ 1000 | V |
-| `0x02` | 電壓 Voltage 2 (U2) | 原始值 ÷ 1000 | V |
-| `0x03` | 電壓 Voltage 3 (U3) | 原始值 ÷ 1000 | V |
-| `0x04` | 溫度 Temperature (T) | 原始值 ÷ 10 | °C |
-| `0x05` | 功率 Power | 原始值 | W |
-| `0x06` | 電量累計 | 原始值 | As |
-| `0x07` | 能量累計 | 原始值 | Wh |
+| `0x00` | Current (I) | raw / 1000 | A |
+| `0x01` | Voltage 1 (U1) | raw / 1000 | V |
+| `0x02` | Voltage 2 (U2) | raw / 1000 | V |
+| `0x03` | Voltage 3 (U3) | raw / 1000 | V |
+| `0x04` | Temperature (T) | raw / 10 | °C |
+| `0x05` | Power | raw | W |
+| `0x06` | Ampere-seconds (As) | raw | As |
+| `0x07` | Watt-hours (Wh) | raw | Wh |
 
-狀態旗標使用 DB1 高 4 位元，對應 `IVTDecodedData::StatusFlag`：
+### Status bits
 
-| 旗標值 | 意義 |
+The code stores status flags as a bitmask in `IVTDecodedData::status_flags` and checks them individually using the enum values:
+
+| Value | Meaning |
 | --- | --- |
-| `0x01` | OCS 過流保護觸發 |
-| `0x02` | 超出範圍／量測錯誤 |
-| `0x04` | 一個或多個通道發生錯誤 |
-| `0x08` | 系統錯誤 |
+| `0x01` | OCS overcurrent protection triggered |
+| `0x02` | Out-of-range / measurement error |
+| `0x04` | Error on one or more channels |
+| `0x08` | System error |
 
-範例：
+These bits are checked by `printIVTData()` using bitwise operations. The status field can contain more than one flag at the same time.
+
+## Example: Decode a measurement packet
 
 ```cpp
 #include "EM_IVT_Decode.h"
@@ -58,16 +124,16 @@ int main() {
     CANFrame frame{};
     frame.id = 0x521;
     frame.dlc = 6;
-    frame.data[0] = 0x00; // MuxID：電流
-    frame.data[1] = 0x03; // 狀態旗標為 0，訊息計數器為 3
+    frame.data[0] = 0x00; // MuxID: Current
+    frame.data[1] = 0x03; // message counter = 3, status = 0
     frame.data[2] = 0x00;
     frame.data[3] = 0x00;
     frame.data[4] = 0x03;
-    frame.data[5] = 0xE8; // 原始值 1000，換算後為 1.000 A
+    frame.data[5] = 0xE8; // raw = 1000 => 1.000 A
 
     IVTDecodedData decoded{};
     if (!decodeIVTFrame(frame, decoded)) {
-        std::cerr << "無法解碼此 CAN frame\n";
+        std::cerr << "Unable to decode this CAN frame\n";
         return 1;
     }
 
@@ -76,15 +142,7 @@ int main() {
 }
 ```
 
-`printIVTData` 會輸出通道、MuxID、訊息計數器、原始值、換算後的物理量及狀態旗標。
-
-## 建立設定指令
-
-`IVTCommandBuilder` 提供高階 API，並以 `IVTChannel` 列舉表示通道，預設指令 CAN ID 為 `0x411`。
-
-### 設定通道刷新
-
-`configChannel` 可設定通道是否啟用循環刷新、刷新週期（毫秒）及資料位元組序。預設為 Big-endian，且使用預設指令 ID。
+## Example: Build a configuration command
 
 ```cpp
 #include "Setting_EM_IVT.h"
@@ -94,8 +152,8 @@ int main() {
 int main() {
     CANCommandFrame current_config = IVTCommandBuilder::configChannel(
         IVTChannel::Current,
-        true,   // 啟用循環刷新
-        100     // 刷新週期：100 ms
+        true,
+        100
     );
 
     printCANFrame(current_config);
@@ -103,27 +161,25 @@ int main() {
 }
 ```
 
-`is_little_endian` 設為 `true` 時會在指令中設定 little-endian 旗標；`cmd_id` 可用來覆寫預設 CAN ID。
-
-### 設定正向過流保護門檻
-
-`setPositiveThreshold` 接受以安培為單位的 `int16_t` 門檻值：
+## Example: Query error/log history
 
 ```cpp
-CANCommandFrame threshold_config =
-    IVTCommandBuilder::setPositiveThreshold(100); // 100 A
+#include "Setting_EM_IVT.h"
+
+#include <iostream>
+
+int main() {
+    CANCommandFrame req = IVTCommandBuilder::buildGetErrorRequest(
+        IVTLogType::SinceReset,
+        0x02
+    );
+
+    printCANFrame(req);
+    return 0;
+}
 ```
 
-### 建立完整設定流程
-
-將個別設定 frame 放入 `custom_configs`，再呼叫 `buildFullConfigSequence`。函式會按照以下順序建立 frame：
-
-1. 切換至 STOP。
-2. 插入自訂設定指令。
-3. 儲存設定至 EEPROM。
-4. 切換至 RUN。
-5. 再次儲存設定至 EEPROM。
-6. 重啟感測器。
+## Example: Build a full configuration sequence
 
 ```cpp
 #include "Setting_EM_IVT.h"
@@ -133,43 +189,39 @@ CANCommandFrame threshold_config =
 int main() {
     std::vector<CANCommandFrame> custom_configs;
     custom_configs.push_back(IVTCommandBuilder::configChannel(
-        IVTChannel::Current, true, 100));
+        IVTChannel::Current,
+        true,
+        100
+    ));
     custom_configs.push_back(IVTCommandBuilder::setPositiveThreshold(100));
 
-    const std::vector<CANCommandFrame> sequence =
-        IVTCommandBuilder::buildFullConfigSequence(custom_configs);
+    const auto sequence = IVTCommandBuilder::buildFullConfigSequence(custom_configs);
 
-    for (const CANCommandFrame& frame : sequence) {
+    for (const auto& frame : sequence) {
         printCANFrame(frame);
-        // 在此使用 CAN 裝置／函式庫傳送 frame。
+        // Send the frame with your CAN transport layer here.
     }
 
     return 0;
 }
 ```
 
-`buildFullConfigSequence` 只負責組合 frame，不會自行傳送指令。若使用自訂 `cmd_id`，請將相同 ID 傳給完整流程及各個自訂設定的建構函式，例如：
+## Build examples
 
-```cpp
-const uint32_t custom_cmd_id = 0x412;
-CANCommandFrame config = IVTCommandBuilder::configChannel(
-    IVTChannel::Current, true, 100, false, custom_cmd_id);
-const std::vector<CANCommandFrame> sequence =
-    IVTCommandBuilder::buildFullConfigSequence({config}, custom_cmd_id);
-```
-
-各自訂 frame 的 ID 不會由完整流程自動改寫。
-
-## 編譯範例
-
-使用 GCC／Clang 編譯上方範例時，請將所需模組的 `.cpp` 一併編譯。例如解碼範例：
+Use your own example source file instead of `main.cpp` when compiling. For example:
 
 ```sh
-g++ -std=c++11 -Wall -Wextra -pedantic main.cpp EM_IVT_Decode.cpp -o ivt_decode
+g++ -std=c++11 -Wall -Wextra -pedantic example_decode.cpp EM_IVT_Decode.cpp -o ivt_decode
 ```
-
-設定範例則改為：
 
 ```sh
-g++ -std=c++11 -Wall -Wextra -pedantic main.cpp Setting_EM_IVT.cpp -o ivt_setting
+g++ -std=c++11 -Wall -Wextra -pedantic example_setting.cpp Setting_EM_IVT.cpp -o ivt_setting
 ```
+
+If you need a custom CAN ID, pass `cmd_id` to the builder functions and to `buildFullConfigSequence` so the resulting packet IDs remain consistent.
+
+## Notes
+
+- `result.status_flags` is stored as an enum value but is interpreted as a bitmask in the implementation.
+- `buildFullConfigSequence()` does not send frames automatically; it only returns a ready-to-send sequence.
+- `decodeErrorResponse()` expects the sensor response frame to have the correct response code and enough data bytes to decode the 32-bit value.
