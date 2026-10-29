@@ -4,21 +4,24 @@
 #include <string>
 #include <vector>
 
+// 1. 手冊 8.5 節：Log / Error 請求類型
 enum class IVTLogType : uint8_t {
-    SinceReset = 0x40, // 讀取自上次 Reset 至今的 Error/Log
-    Overall    = 0x42  // 讀取生命週期累積 Overall Log
+    MeasurementErrors = 0x40, // 讀取量測錯誤 (DB0 = 0x40)
+    SystemErrors      = 0x41, // 讀取系統錯誤 (DB0 = 0x41)
+    OverallLog        = 0x42, // 讀取 Overall 統計數據 (DB0 = 0x42)
+    SinceResetLog     = 0x43  // 讀取 Since Reset 統計數據 (DB0 = 0x43)
 };
 
-// 2. 解譯 Get Error Response 的結果結構
+// 2. 解譯 Get Error / Log Response 的結果結構
 struct IVTErrorLogResult {
-    uint8_t     response_code; // 0xC0 (SinceReset) 或 0xC2 (Overall)
-    uint8_t     log_index;     // 查詢的 Log Index (0x00 ~ 0x1F)
-    std::string error_name;    // 錯誤/日誌名稱描述
-    uint32_t    raw_value;     // DB2..DB5 解析出來的 32-bit 數據
+    uint8_t     response_code; // 0x80 (Measurement), 0x81 (System), 0x82 (Overall), 0x83 (SinceReset)
+    uint8_t     log_index;     // 查詢的 Index/Sub-code
+    std::string description;   // 名稱描述
+    uint64_t    raw_value;     // DB2..DB7 解析出來的數據 (可長達 6 頁位元組)
     bool        is_success;    // 是否解析成功
 };
 
-// 1. 定義語意化的通道名稱，不需要人工記憶 MuxID
+// 3. 通道名稱 (Mux ID)
 enum class IVTChannel : uint8_t {
     Current  = 0x00, // 電流 I
     Voltage1 = 0x01, // 電壓 U1
@@ -39,12 +42,9 @@ struct CANCommandFrame {
 
 class IVTCommandBuilder {
 public:
-
     static constexpr uint32_t DEFAULT_CMD_ID = 0x411;  
 
     // --- 發送 Get Error / Log 請求 ---
-    // log_type: SinceReset (0x40) 或 Overall (0x42)
-    // log_index: 指定要查詢的 Error Code Index (例如 0x01: Hardware, 0x09: Pos Overcurrent)
     static CANCommandFrame buildGetErrorRequest(
         IVTLogType log_type,
         uint8_t log_index,
@@ -55,9 +55,7 @@ public:
         const CANCommandFrame& response_frame,
         IVTErrorLogResult& result);
 
-    // --- 高階設定 API (免記指令碼與 MuxID) ---
-
-    // 1. 設定通道刷新週期與開關 (使用 IVTChannel)
+    // --- 高階通道配置 API ---
     static CANCommandFrame configChannel(
         IVTChannel channel,
         bool enable_cyclic,
@@ -65,18 +63,26 @@ public:
         bool is_little_endian = false,
         uint32_t cmd_id = DEFAULT_CMD_ID);
 
-    // 2. 設定正向過流保護門檻 (安培 A)
+    // --- 過流保護門檻設定 API ---
+    // threshold_A: 觸發門檻, reset_threshold_A: 復歸門檻
     static CANCommandFrame setPositiveThreshold(
-        int16_t threshold_current_A,
+        int16_t threshold_A,
+        int16_t reset_threshold_A = 0,
+        uint32_t cmd_id = DEFAULT_CMD_ID);
+
+    static CANCommandFrame setNegativeThreshold(
+        int16_t threshold_A,
+        int16_t reset_threshold_A = 0,
         uint32_t cmd_id = DEFAULT_CMD_ID);
 
     // --- 底層基礎命令建構器 ---
     static CANCommandFrame buildSetMode(uint8_t mode, uint8_t default_mode, uint32_t cmd_id = DEFAULT_CMD_ID);
     static CANCommandFrame buildStoreCommand(uint32_t cmd_id = DEFAULT_CMD_ID);
+    
+    // 【修正】手冊 8.4 節標準 RESTART 命令字碼為 0x3F
     static CANCommandFrame buildRestartCommand(uint32_t cmd_id = DEFAULT_CMD_ID);
 
-    // --- 核心：自動包裝必要流程的 Function ---
-    // 自動生成：STOP -> [custom_configs...] -> STORE -> RUN -> STORE -> RESTART
+    // --- 核心：自動包裝完整配置流程 ---
     static std::vector<CANCommandFrame> buildFullConfigSequence(
         const std::vector<CANCommandFrame>& custom_configs,
         uint32_t cmd_id = DEFAULT_CMD_ID);
