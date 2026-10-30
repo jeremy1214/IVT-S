@@ -46,3 +46,9 @@ cmake-build-release/
 
 # macOS 系統檔案
 .DS_Store
+
+# log 測試檔
+*.log
+
+# main.cpp 測試檔案
+main.cpp

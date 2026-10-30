@@ -1,6 +1,8 @@
 #include "Setting_EM_IVT.h"
 #include <iomanip>
 #include <iostream>
+#include <chrono>
+#include <ctime>
 
 static std::string channelToString(IVTChannel channel) {
     switch (channel) {
@@ -126,6 +128,110 @@ bool IVTCommandBuilder::decodeErrorResponse(
     return true;
 }
 
+bool IVTCommandBuilder::decodeCommandResponse(
+    const CANCommandFrame& rx_frame,
+    IVTCommandResponseResult& result) {
+
+    if (rx_frame.dlc < 2) {
+        result.is_success = false;
+        return false;
+    }
+
+    uint8_t resp_code = rx_frame.data[0];
+    if (resp_code < 0x90 || resp_code > 0xBF) {
+        result.is_success = false;
+        return false;
+    }
+
+    result.response_code = resp_code;
+    result.result_status = rx_frame.data[1];
+
+    switch (resp_code) {
+        case 0x94: result.description = "Set Mode Response (0x94)"; break;
+        case 0xB2: result.description = "Store EEPROM Response (0xB2)"; break;
+        case 0xBF: result.description = "Restart Sensor Response (0xBF)"; break;
+        case 0xB5: result.description = "Set Pos OCS Threshold Response (0xB5)"; break;
+        case 0xB6: result.description = "Set Neg OCS Threshold Response (0xB6)"; break;
+        default:
+            if (resp_code >= 0xA0 && resp_code <= 0xA7) {
+                result.description = "Config Channel Response (0x" + std::to_string(static_cast<int>(resp_code)) + ")";
+            } else {
+                result.description = "Command Response (0x" + std::to_string(static_cast<int>(resp_code)) + ")";
+            }
+            break;
+    }
+
+    result.is_success = (result.result_status == 0x00);
+    return true;
+}
+
+// 【新增】解析週期性發送的實時數據 (CAN ID: 0x521 ~ 0x528)
+bool IVTCommandBuilder::decodeDataResponse(
+    const CANCommandFrame& rx_frame,
+    IVTDataResult& result) {
+
+    if (rx_frame.dlc < 6) {
+        result.is_success = false;
+        return false;
+    }
+
+    // 可從 CAN ID (0x521 ~ 0x528) 或 DB0 (Mux ID: 0x00 ~ 0x07) 判斷通道
+    uint8_t mux_id = rx_frame.data[0];
+    if (rx_frame.id >= 0x521 && rx_frame.id <= 0x528) {
+        mux_id = rx_frame.id - 0x521;
+    }
+
+    if (mux_id > 0x07) {
+        result.is_success = false;
+        return false;
+    }
+
+    result.mux_id       = mux_id;
+    result.channel_name = channelToString(static_cast<IVTChannel>(mux_id));
+    result.status_flags = rx_frame.data[1];
+
+    // DB2..DB5 為 32-bit Big-Endian 有符號整數 (int32_t)
+    int32_t raw_32 = (static_cast<int32_t>(rx_frame.data[2]) << 24) |
+                     (static_cast<int32_t>(rx_frame.data[3]) << 16) |
+                     (static_cast<int32_t>(rx_frame.data[4]) << 8)  |
+                     (static_cast<int32_t>(rx_frame.data[5]));
+
+    result.raw_value = raw_32;
+
+    // 依據手冊 8.1 節 (Page 21) 的物理數值轉換比例
+    switch (static_cast<IVTChannel>(mux_id)) {
+        case IVTChannel::Current:
+            result.physical_value = raw_32 / 1000.0; // 1 mA/LSB -> A
+            result.unit = "A";
+            break;
+        case IVTChannel::Voltage1:
+        case IVTChannel::Voltage2:
+        case IVTChannel::Voltage3:
+            result.physical_value = raw_32 / 1000.0; // 1 mV/LSB -> V
+            result.unit = "V";
+            break;
+        case IVTChannel::Temp:
+            result.physical_value = raw_32 / 10.0;   // 0.1 °C/LSB -> °C
+            result.unit = "°C";
+            break;
+        case IVTChannel::Power:
+            result.physical_value = raw_32;          // 1 W/LSB -> W
+            result.unit = "W";
+            break;
+        case IVTChannel::As:
+            result.physical_value = raw_32;          // 1 As/LSB -> As
+            result.unit = "As";
+            break;
+        case IVTChannel::Wh:
+            result.physical_value = raw_32;          // 1 Wh/LSB -> Wh
+            result.unit = "Wh";
+            break;
+    }
+
+    result.is_success = true;
+    return true;
+}
+
 CANCommandFrame IVTCommandBuilder::configChannel(
     IVTChannel channel,
     bool enable_cyclic,
@@ -226,7 +332,6 @@ CANCommandFrame IVTCommandBuilder::buildStoreCommand(uint32_t cmd_id) {
     return frame;
 }
 
-// 【修正】遵循官方手冊 8.4 節，RESTART 指令碼為 0x3F
 CANCommandFrame IVTCommandBuilder::buildRestartCommand(uint32_t cmd_id) {
     CANCommandFrame frame{};
     frame.id = cmd_id;
@@ -266,11 +371,46 @@ std::vector<CANCommandFrame> IVTCommandBuilder::buildFullConfigSequence(
     return sequence;
 }
 
+void IVTCommandBuilder::logCANMessage(
+    std::ofstream& log_file,
+    const std::string& direction,
+    uint32_t can_id,
+    uint8_t dlc,
+    const uint8_t* data,
+    const std::string& description) {
+    
+    if (!log_file.is_open()) return;
+
+    // 取得精確時間戳記 (毫秒級)
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+
+    char time_str[100];
+    std::strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", std::localtime(&now_time));
+
+    log_file << "[" << time_str << "." << std::setfill('0') << std::setw(3) << ms.count() << "] "
+             << "[" << direction << "] "
+             << "ID: 0x" << std::hex << std::uppercase << can_id << std::dec << " | "
+             << "DLC: " << static_cast<int>(dlc) << " | Data: ";
+
+    for (int i = 0; i < dlc; ++i) {
+        log_file << std::hex << std::uppercase << std::setw(2) << std::setfill('0')
+                 << static_cast<int>(data[i]) << " ";
+    }
+    log_file << std::dec;
+
+    if (!description.empty()) {
+        log_file << " | (" << description << ")";
+    }
+    log_file << std::endl;
+}
+
 void printCANFrame(const CANCommandFrame& frame) {
     std::cout << "[" << frame.description << "]" << std::endl;
-    std::cout << "  CAN ID : 0x" << std::hex << std::uppercase << frame.id << std::dec << std::endl;
-    std::cout << "  DLC    : " << static_cast<int>(frame.dlc) << std::endl;
-    std::cout << "  Payload: ";
+    std::cout << "  ID   : 0x" << std::hex << std::uppercase << frame.id << std::dec << std::endl;
+    std::cout << "  DLC  : " << static_cast<int>(frame.dlc) << std::endl;
+    std::cout << "  Data : ";
     for (uint8_t i = 0; i < frame.dlc; ++i) {
         std::cout << std::hex << std::uppercase << std::setw(2) << std::setfill('0')
                   << static_cast<int>(frame.data[i]) << " ";
